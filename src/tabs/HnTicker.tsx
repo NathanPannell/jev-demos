@@ -20,6 +20,9 @@ const MAX_IN_FLIGHT = 4
 const POLL_MS = 12_000
 const AUTO_PAUSE_MS = 120_000
 const HIT = 0.5
+/** Algolia stops paging after ~1000 hits; wrap back to the newest page (seen ids are skipped). */
+const MAX_PAGE = 12
+const REFILL_BACKOFF_MS = 8_000
 
 function subscribeVisibility(cb: () => void) {
   document.addEventListener('visibilitychange', cb)
@@ -42,6 +45,7 @@ export default function HnTicker() {
   const page = useRef(0)
   const inFlight = useRef(0)
   const fetching = useRef(false)
+  const refillAfter = useRef(0)
   const playStart = useRef(0)
 
   const enqueue = useCallback((comments: HnComment[], live: boolean, front: boolean) => {
@@ -53,15 +57,17 @@ export default function HnTicker() {
   }, [])
 
   const refill = useCallback(async () => {
-    if (fetching.current) return
+    if (fetching.current || Date.now() < refillAfter.current) return
     fetching.current = true
     try {
       // Oldest first, so the stream reads forward in time.
       const comments = await fetchComments({ page: page.current })
-      page.current += 1
+      page.current = page.current >= MAX_PAGE ? 0 : page.current + 1
       enqueue([...comments].reverse(), false, false)
+      setError(null)
     } catch {
-      setError('Could not reach the Hacker News API. Retrying…')
+      refillAfter.current = Date.now() + REFILL_BACKOFF_MS
+      setError('Could not reach the Hacker News API. Retrying shortly…')
     } finally {
       fetching.current = false
     }
@@ -96,8 +102,9 @@ export default function HnTicker() {
       }
     } catch (err) {
       setFirehose((f) => f.filter((x) => x.c.id !== item.c.id))
-      if (err instanceof JevError && (err.status === 429 || err.status === 503)) {
-        setError(err.message)
+      // A one-off upstream hiccup (502) is skipped; anything else stops the stream and says why.
+      if (!(err instanceof JevError && err.status === 502)) {
+        setError(err instanceof Error ? err.message : 'Jev call failed')
         setPlaying(false)
       }
     } finally {

@@ -54,9 +54,21 @@ export class RateLimiter {
   }
 }
 
-/** The client IP as seen by Vercel's edge (or the local dev server). */
+/**
+ * The client as seen by Vercel's edge (or the local dev server). IPv6 clients are grouped by
+ * their /64, since one client can usually rotate through a whole /64.
+ */
 export function clientIp(headers: Headers): string {
   const forwarded = headers.get('x-forwarded-for')
-  if (forwarded) return forwarded.split(',')[0].trim()
-  return headers.get('x-real-ip') ?? 'unknown'
+  const ip = forwarded ? forwarded.split(',')[0].trim() : (headers.get('x-real-ip') ?? 'unknown')
+  if (!ip.includes(':') || ip.startsWith('::ffff:')) return ip
+  return `${expandIpv6(ip).slice(0, 4).join(':')}::/64`
+}
+
+function expandIpv6(ip: string): string[] {
+  const [head, tail = ''] = ip.split('::')
+  const left = head ? head.split(':') : []
+  const right = tail ? tail.split(':') : []
+  const missing = ip.includes('::') ? 8 - left.length - right.length : 0
+  return [...left, ...Array<string>(Math.max(0, missing)).fill('0'), ...right]
 }

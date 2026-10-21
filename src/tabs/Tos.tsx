@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { CallStat, ErrorNote, Hook } from '../components/ui'
 import { SAMPLE_TOS, SAMPLE_TOS_NAME } from '../data/tos'
-import { askJev, mapLimit, noul, type ChoiceAnswer, type ScoreAnswer } from '../lib/jev'
+import { askJev, JevError, mapLimit, noul, type ChoiceAnswer, type ScoreAnswer } from '../lib/jev'
 import { FLAG_KINDS, severity, splitClauses, UNFAIR_QUESTION, type FlagKind } from '../lib/tos'
 import { formatPct, formatUsd } from '../lib/format'
 import { blip } from '../lib/sound'
@@ -10,6 +10,8 @@ import { blip } from '../lib/sound'
 interface Verdict {
   p: number
   kind: FlagKind
+  /** The call failed or was skipped; shown unhighlighted so the sweep can move on. */
+  failed?: boolean
 }
 
 const KIND_CRITERIA = Object.fromEntries(
@@ -44,6 +46,7 @@ export default function Tos() {
   } | null>(null)
   const [asking, setAsking] = useState(false)
   const runId = useRef(0)
+  const scanAbort = useRef<AbortController | null>(null)
   const clauseEls = useRef(new Map<number, HTMLElement>())
   const docRef = useRef<HTMLDivElement>(null)
 
@@ -70,8 +73,21 @@ export default function Tos() {
     if (Math.abs(pane.scrollTop - target) > 40) pane.scrollTo({ top: target, behavior: 'smooth' })
   }, [cursor])
 
+  // Abandoned scans stop spending: abort in-flight and queued clause calls.
+  function cancelScan() {
+    runId.current++
+    scanAbort.current?.abort()
+    scanAbort.current = null
+    setScanning(false)
+  }
+  useEffect(() => () => scanAbort.current?.abort(), [])
+
   async function scan() {
-    const id = ++runId.current
+    cancelScan()
+    const id = runId.current
+    const ctrl = new AbortController()
+    scanAbort.current = ctrl
+    const { signal } = ctrl
     setVerdicts({})
     setOverall(null)
     setSpent({ cost: 0, calls: 0, latency: 0 })
@@ -82,47 +98,70 @@ export default function Tos() {
     const track = (cost: number, latency: number) =>
       setSpent((s) => ({ cost: s.cost + cost, calls: s.calls + 1, latency: s.latency + latency }))
 
-    const whole = askJev('tos', {
-      state: doc,
-      questions: {
-        hostile: {
-          type: 'score',
-          instructions: 'Overall, how user-hostile is this terms of service?',
-          criteria: SCORE_LEVELS,
+    const fail = (err: unknown) => {
+      if (signal.aborted || id !== runId.current) return
+      setError(err instanceof Error ? err.message : 'Scan failed')
+      // Rate limited or over budget: stop queuing more calls.
+      if (err instanceof JevError && (err.status === 429 || err.status === 503)) ctrl.abort()
+    }
+
+    const whole = askJev(
+      'tos',
+      {
+        state: doc,
+        questions: {
+          hostile: {
+            type: 'score',
+            instructions: 'Overall, how user-hostile is this terms of service?',
+            criteria: SCORE_LEVELS,
+          },
         },
       },
-    }).then((r) => {
+      { signal },
+    ).then((r) => {
       if (id !== runId.current) return
       track(r.usage.cost, r.latencyMs)
       setOverall(r.answers.hostile as ScoreAnswer)
-    })
+    }, fail)
 
     const body = clauses.filter((c) => !c.heading)
     const each = mapLimit(body, 6, async (c) => {
-      const r = await askJev('tos', {
-        state: c.text,
-        questions: {
-          unfair: { type: 'noul', instructions: UNFAIR_QUESTION },
-          kind: {
-            type: 'choice',
-            instructions: 'What is this terms-of-service clause mainly about?',
-            criteria: KIND_CRITERIA,
+      if (signal.aborted) return
+      try {
+        const r = await askJev(
+          'tos',
+          {
+            state: c.text,
+            questions: {
+              unfair: { type: 'noul', instructions: UNFAIR_QUESTION },
+              kind: {
+                type: 'choice',
+                instructions: 'What is this terms-of-service clause mainly about?',
+                criteria: KIND_CRITERIA,
+              },
+            },
           },
-        },
-      })
-      if (id !== runId.current) return
-      track(r.usage.cost, r.latencyMs)
-      const kind = (r.answers.kind as ChoiceAnswer).choice as FlagKind
-      setVerdicts((v) => ({ ...v, [c.id]: { p: noul(r, 'unfair'), kind } }))
+          { signal },
+        )
+        if (id !== runId.current) return
+        track(r.usage.cost, r.latencyMs)
+        const kind = (r.answers.kind as ChoiceAnswer).choice as FlagKind
+        setVerdicts((v) => ({ ...v, [c.id]: { p: noul(r, 'unfair'), kind } }))
+      } catch (err) {
+        fail(err)
+      }
     })
 
-    try {
-      await Promise.all([whole, each])
-    } catch (err) {
-      if (id === runId.current) setError(err instanceof Error ? err.message : 'Scan failed')
-    } finally {
-      if (id === runId.current) setScanning(false)
-    }
+    await Promise.all([whole, each])
+    if (id !== runId.current) return
+    // Anything that failed or was skipped is marked so the highlighter finishes its sweep.
+    setVerdicts((v) => {
+      const filled = { ...v }
+      for (const c of body) filled[c.id] ??= { p: 0, kind: 'ordinary', failed: true }
+      return filled
+    })
+    setScanning(false)
+    scanAbort.current = null
   }
 
   async function ask(q: string) {
@@ -153,14 +192,13 @@ export default function Tos() {
       setError('Paste at least a few paragraphs of terms.')
       return
     }
-    runId.current++
+    cancelScan()
     setDoc(text.slice(0, 110_000))
     setEditing(false)
     setVerdicts({})
     setOverall(null)
     setCursor(-1)
     setAnswer(null)
-    setScanning(false)
   }
 
   const revealed = (i: number) => cursor > i || (cursor >= clauses.length && cursor >= 0)
@@ -198,7 +236,7 @@ export default function Tos() {
           <button
             className="ghost-btn"
             onClick={() => {
-              runId.current++
+              cancelScan()
               setDoc(SAMPLE_TOS)
               setVerdicts({})
               setCursor(-1)

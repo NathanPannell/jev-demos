@@ -15,9 +15,22 @@ export function fitDimensions(w: number, h: number): { width: number; height: nu
   return { width, height }
 }
 
-/** Loads any image the browser can decode and re-encodes it as a JPEG data URL within limits. */
+/**
+ * Loads any image the browser can decode and re-encodes it as a JPEG data URL within limits.
+ * `url` is what to display: the original path for samples, or the data URL for uploads (so no
+ * object URL outlives this call).
+ */
 export async function toJevImage(source: Blob | string): Promise<{ dataUrl: string; url: string }> {
-  const url = typeof source === 'string' ? source : URL.createObjectURL(source)
+  const objectUrl = typeof source === 'string' ? null : URL.createObjectURL(source)
+  try {
+    const dataUrl = await encode(objectUrl ?? (source as string))
+    return { dataUrl, url: objectUrl ? dataUrl : (source as string) }
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+  }
+}
+
+async function encode(url: string): Promise<string> {
   const img = new Image()
   img.decoding = 'async'
   img.src = url
@@ -31,5 +44,5 @@ export async function toJevImage(source: Blob | string): Promise<{ dataUrl: stri
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, width, height)
   ctx.drawImage(img, 0, 0, width, height)
-  return { dataUrl: canvas.toDataURL('image/jpeg', 0.86), url }
+  return canvas.toDataURL('image/jpeg', 0.86)
 }

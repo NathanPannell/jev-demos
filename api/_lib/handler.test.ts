@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createJevHandler,
   defaultLimiter,
+  estimateCostUsd,
   LONG_CONTEXT_CHARS,
   MODEL,
+  parseBudget,
   UPSTREAM_URL,
 } from './handler'
 import { RateLimiter } from './rateLimit'
@@ -106,10 +108,32 @@ describe('POST /api/jev', () => {
     expect((await handler(post(ask, { 'x-forwarded-for': '5.6.7.8' }))).status).toBe(200)
   })
 
-  it('stops at the hourly spend cap', async () => {
-    const { handler } = setup({ hourlyBudgetUsd: 0.00001 })
-    expect((await handler(post(ask))).status).toBe(200)
-    expect((await handler(post(ask))).status).toBe(503)
+  it('stops at the hourly spend cap, counting in-flight requests', async () => {
+    const budget = estimateCostUsd(8, 0) * 1.5
+    const { handler } = setup({ hourlyBudgetUsd: budget })
+    // The settled cost (upstreamOk) is below the reservation, so allow a few, then refuse.
+    let status = 200
+    for (let i = 0; i < 50 && status === 200; i++) status = (await handler(post(ask))).status
+    expect(status).toBe(503)
+
+    let release: (r: Response) => void = () => {}
+    const slow = setup({
+      hourlyBudgetUsd: budget,
+      fetch: (() => new Promise<Response>((r) => (release = r))) as unknown as typeof fetch,
+    })
+    const first = slow.handler(post(ask))
+    await new Promise((r) => setTimeout(r, 0))
+    // The first call is still in flight, but its reservation already counts.
+    expect((await slow.handler(post(ask))).status).toBe(503)
+    release(Response.json(upstreamOk))
+    expect((await first).status).toBe(200)
+  })
+
+  it('requires a JSON content type', async () => {
+    const { handler, fetchMock } = setup()
+    const res = await handler(post(ask, { 'content-type': 'text/plain' }))
+    expect(res.status).toBe(415)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('maps upstream failures', async () => {
@@ -143,5 +167,15 @@ describe('POST /api/jev', () => {
     const body = await (await handler(post(ask))).json()
     expect(body.usage).toEqual({ inputTokens: 0, outputTokens: 0, cost: 0 })
     expect(body.model).toBe(MODEL)
+  })
+})
+
+describe('parseBudget', () => {
+  it('falls back on missing or invalid values', () => {
+    expect(parseBudget(undefined)).toBe(0.5)
+    expect(parseBudget('')).toBe(0.5)
+    expect(parseBudget('lots')).toBe(0.5)
+    expect(parseBudget('-1')).toBe(0.5)
+    expect(parseBudget('2')).toBe(2)
   })
 })

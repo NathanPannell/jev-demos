@@ -13,7 +13,7 @@ export default defineConfig({
       include: ['src/lib/**/*.ts', 'api/**/*.ts'],
       exclude: ['**/*.test.ts'],
       reporter: ['text', 'json-summary'],
-      thresholds: { lines: 95, functions: 95, branches: 94, statements: 95 },
+      thresholds: { lines: 98, functions: 96, branches: 95, statements: 98 },
     },
   },
 })

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Stage } from '../components/Stage'
 import { CallStat, ErrorNote, Hook } from '../components/ui'
@@ -11,6 +11,7 @@ import { blip } from '../lib/sound'
 type Mode = 'puzzle' | 'anything'
 
 interface Found {
+  query: string
   box: Box
   confidence: number
   present: number | null
@@ -61,6 +62,7 @@ function Puzzle() {
   const [zoomed, setZoomed] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const zoomTimer = useRef<number>(0)
+  useEffect(() => () => window.clearTimeout(zoomTimer.current), [])
 
   async function find(id: string) {
     const t = TARGETS.find((x) => x.id === id)!
@@ -79,6 +81,7 @@ function Puzzle() {
       })
       const a = r.answers.where as BoxAnswer
       setFound({
+        query: t.prompt,
         box: a.box,
         confidence: a.confidence,
         present: null,
@@ -160,8 +163,15 @@ function Anything() {
   const [zoomed, setZoomed] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const zoomTimer = useRef(0)
+  const runId = useRef(0)
+
+  useEffect(() => () => window.clearTimeout(zoomTimer.current), [])
 
   async function pickImage(source: File | string) {
+    if (busy) return
+    runId.current++
+    window.clearTimeout(zoomTimer.current)
     setError(null)
     setFound(null)
     setZoomed(false)
@@ -180,7 +190,9 @@ function Anything() {
   }
 
   async function find() {
-    if (!image || !query.trim()) return
+    if (!image || !query.trim() || busy) return
+    const id = ++runId.current
+    window.clearTimeout(zoomTimer.current)
     setBusy(true)
     setError(null)
     setFound(null)
@@ -195,9 +207,11 @@ function Anything() {
           present: { type: 'noul', instructions: `Is there ${q} in this image?` },
         },
       })
+      if (id !== runId.current) return
       const a = r.answers.where as BoxAnswer
       const present = noul(r, 'present')
       setFound({
+        query: q,
         box: a.box,
         confidence: a.confidence,
         present,
@@ -205,7 +219,7 @@ function Anything() {
         cost: r.usage.cost,
       })
       blip(present >= 0.35 ? 'hit' : 'error')
-      if (present >= 0.35) window.setTimeout(() => setZoomed(true), 700)
+      if (present >= 0.35) zoomTimer.current = window.setTimeout(() => setZoomed(true), 700)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
@@ -227,14 +241,14 @@ function Anything() {
               found
                 ? absent
                   ? `Probably not here (${formatPct(found.present ?? 0)}) · best guess`
-                  : `${query} · ${formatPct(found.confidence)} sure`
+                  : `${found.query} · ${formatPct(found.confidence)} sure`
                 : undefined
             }
             dashed={absent}
             tone={absent ? 'hot' : 'accent'}
             zoomed={zoomed}
             scanning={busy}
-            onDropFile={(f) => void pickImage(f)}
+            onDropFile={busy ? undefined : (f) => void pickImage(f)}
           >
             {zoomed && (
               <button className="zoom-out" onClick={() => setZoomed(false)}>
@@ -276,11 +290,16 @@ function Anything() {
         <h3>1. Pick an image</h3>
         <div className="chips">
           {SAMPLE_IMAGES.map((s) => (
-            <button key={s.id} className="chip" onClick={() => void pickImage(s.src)}>
+            <button
+              key={s.id}
+              className="chip"
+              onClick={() => void pickImage(s.src)}
+              disabled={busy}
+            >
               {s.label}
             </button>
           ))}
-          <button className="chip" onClick={() => fileInput.current?.click()}>
+          <button className="chip" onClick={() => fileInput.current?.click()} disabled={busy}>
             Upload your own…
           </button>
         </div>

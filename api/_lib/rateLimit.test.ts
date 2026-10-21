@@ -42,4 +42,13 @@ describe('clientIp', () => {
     expect(clientIp(new Headers({ 'x-real-ip': '8.8.8.8' }))).toBe('8.8.8.8')
     expect(clientIp(new Headers())).toBe('unknown')
   })
+
+  it('groups IPv6 clients by /64', () => {
+    const a = clientIp(new Headers({ 'x-forwarded-for': '2001:db8:1:2:aaaa::1' }))
+    const b = clientIp(new Headers({ 'x-forwarded-for': '2001:db8:1:2:bbbb:cccc:dddd:eeee' }))
+    expect(a).toBe('2001:db8:1:2::/64')
+    expect(b).toBe(a)
+    expect(clientIp(new Headers({ 'x-real-ip': '::1' }))).toBe('0:0:0:0::/64')
+    expect(clientIp(new Headers({ 'x-forwarded-for': '::ffff:1.2.3.4' }))).toBe('::ffff:1.2.3.4')
+  })
 })

@@ -168,7 +168,7 @@ export default function Adventure() {
             </AnimatePresence>
             {game.inventory.length === 0 && <span className="muted">empty pockets</span>}
           </div>
-          <button className="ghost-btn small" onClick={restart}>
+          <button className="ghost-btn small" onClick={restart} disabled={busy}>
             Restart
           </button>
         </div>

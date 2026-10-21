@@ -9,6 +9,18 @@ import {
 
 export const MODEL = 'typesafe/jev-1.14'
 export const UPSTREAM_URL = 'https://openrouter.ai/api/v1/systemone'
+/** Rough upper bound on a request's cost, reserved against the budget before calling Jev. */
+export function estimateCostUsd(chars: number, imageBytes: number): number {
+  const tokens = 400 + chars / 3 + (imageBytes > 0 ? 4_000 : 0)
+  return tokens * 0.000000042
+}
+
+/** Parses the hourly budget env var; anything missing or invalid falls back to the default. */
+export function parseBudget(raw: string | undefined, fallback = 0.5): number {
+  const n = Number(raw)
+  return raw !== undefined && raw.trim() !== '' && Number.isFinite(n) && n > 0 ? n : fallback
+}
+
 /** Above this much text, opt in to Jev's long-context mode (TypeSafe's "Danger Zone"). */
 export const LONG_CONTEXT_CHARS = 100_000
 
@@ -52,6 +64,13 @@ export function createJevHandler(deps: HandlerDeps) {
   return async function POST(request: Request): Promise<Response> {
     if (!deps.apiKey) return json(500, { error: 'Server is missing OPENROUTER_API_KEY' })
 
+    // Requiring JSON forces a CORS preflight, which fails cross-origin (no CORS headers), so other
+    // sites can't spend the key through their visitors' browsers.
+    const type = request.headers.get('content-type') ?? ''
+    if (!type.toLowerCase().startsWith('application/json')) {
+      return json(415, { error: 'Send application/json' })
+    }
+
     const length = Number(request.headers.get('content-length') ?? '0')
     if (length > LIMITS.bodyBytes) return json(413, { error: 'Request is too large' })
 
@@ -84,14 +103,20 @@ export function createJevHandler(deps: HandlerDeps) {
         { 'retry-after': String(wait) },
       )
     }
-    if (spentLastHour(now) >= deps.hourlyBudgetUsd) {
+    const reserved = {
+      at: now,
+      cost: estimateCostUsd(stateChars(req), req.image ? req.image.length * 0.75 : 0),
+    }
+    if (spentLastHour(now) + reserved.cost > deps.hourlyBudgetUsd) {
       return json(503, { error: 'The demo hit its hourly spending cap. Try again later.' })
     }
+    // Reserve now so concurrent requests can't all slip under the cap; settle after the call.
+    spend.push(reserved)
 
     const headers: Record<string, string> = {
       authorization: `Bearer ${deps.apiKey}`,
       'content-type': 'application/json',
-      'http-referer': 'https://jev-demos.vercel.app',
+      'http-referer': 'https://jev-demos-ruddy.vercel.app',
       'x-title': 'Jev Demos',
     }
     if (req.image) headers['TypeSafe-Danger-Zone-Images'] = 'true'
@@ -111,6 +136,7 @@ export function createJevHandler(deps: HandlerDeps) {
         signal: AbortSignal.timeout(25_000),
       })
     } catch {
+      reserved.cost = 0
       return json(502, { error: 'Could not reach Jev' })
     }
     const latencyMs = deps.now() - started
@@ -134,7 +160,7 @@ export function createJevHandler(deps: HandlerDeps) {
     }
     if (!d.answers) return json(502, { error: 'Jev returned no answers' })
     const cost = d.usage?.cost ?? 0
-    spend.push({ at: now, cost })
+    reserved.cost = cost
 
     const payload: JevAnswerPayload = {
       answers: d.answers,
