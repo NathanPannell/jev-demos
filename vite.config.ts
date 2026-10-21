@@ -1,0 +1,19 @@
+/// <reference types="vitest/config" />
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import { apiPlugin } from './scripts/vite-api-plugin'
+
+export default defineConfig({
+  plugins: [react(), apiPlugin()],
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.{ts,tsx}', 'api/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/lib/**/*.ts', 'api/**/*.ts'],
+      exclude: ['**/*.test.ts'],
+      reporter: ['text', 'json-summary'],
+      thresholds: { lines: 90, functions: 90, branches: 80, statements: 90 },
+    },
+  },
+})
