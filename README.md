@@ -51,7 +51,9 @@ The ticker uses **"spicy hot take"**: a 30.5% hit rate keeps the hot lane busy w
 - An allowlist of question types (`noul`, `choice`, `score`, `box`), with the model pinned server-side.
 - Size caps: body 4 MB, image 3.5 MB (PNG/JPEG data URL), state 120K characters, 16 questions, and caps on instruction and criteria lengths.
 - Per-IP rate limits (in memory, per instance): 240/min and 4,000/hour overall, 30/min for images, 20/min for long documents.
-- A per-instance spend ceiling of $0.50/hour (`JEV_HOURLY_BUDGET_USD`).
+- A per-instance spend ceiling of $0.50/hour (`JEV_HOURLY_BUDGET_USD`), with each request's estimated cost reserved before the call.
+- A JSON-only content type, so other sites can't spend the key from their visitors' browsers (cross-origin JSON needs a CORS preflight, and none is allowed).
+- A Vercel Firewall rule in front of the function: 300 requests/min per IP on `/api/jev`, then a 5-minute block.
 
 The HN ticker streams only while its tab is open, the page is visible and the user has pressed play, and it auto-pauses after two minutes. The key's own OpenRouter limit is the hard backstop. There is no database.
 
