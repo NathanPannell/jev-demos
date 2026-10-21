@@ -1,0 +1,151 @@
+import { clientIp, RateLimiter } from './rateLimit.js'
+import {
+  LIMITS,
+  parseJevRequest,
+  stateChars,
+  toUpstreamState,
+  ValidationError,
+} from './validate.js'
+
+export const MODEL = 'typesafe/jev-1.14'
+export const UPSTREAM_URL = 'https://openrouter.ai/api/v1/systemone'
+/** Above this much text, opt in to Jev's long-context mode (TypeSafe's "Danger Zone"). */
+export const LONG_CONTEXT_CHARS = 100_000
+
+export interface JevAnswerPayload {
+  answers: Record<string, unknown>
+  model: string
+  usage: { inputTokens: number; outputTokens: number; cost: number }
+  latencyMs: number
+}
+
+export interface HandlerDeps {
+  apiKey: string | undefined
+  fetch: typeof fetch
+  limiter: RateLimiter
+  now: () => number
+  /** Per-instance spend ceiling per rolling hour, in USD. */
+  hourlyBudgetUsd: number
+}
+
+export function defaultLimiter(): RateLimiter {
+  return new RateLimiter({
+    // The HN ticker classifies a few comments a second while playing.
+    burst: { max: 240, windowMs: 60_000 },
+    hour: { max: 4_000, windowMs: 3_600_000 },
+    image: { max: 30, windowMs: 60_000 },
+    long: { max: 20, windowMs: 60_000 },
+  })
+}
+
+const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  Response.json(body, { status, headers: { 'cache-control': 'no-store', ...headers } })
+
+export function createJevHandler(deps: HandlerDeps) {
+  const spend: { at: number; cost: number }[] = []
+
+  const spentLastHour = (now: number) => {
+    while (spend.length && now - spend[0].at > 3_600_000) spend.shift()
+    return spend.reduce((n, s) => n + s.cost, 0)
+  }
+
+  return async function POST(request: Request): Promise<Response> {
+    if (!deps.apiKey) return json(500, { error: 'Server is missing OPENROUTER_API_KEY' })
+
+    const length = Number(request.headers.get('content-length') ?? '0')
+    if (length > LIMITS.bodyBytes) return json(413, { error: 'Request is too large' })
+
+    let raw: string
+    try {
+      raw = await request.text()
+    } catch {
+      return json(400, { error: 'Could not read the request body' })
+    }
+    if (raw.length > LIMITS.bodyBytes) return json(413, { error: 'Request is too large' })
+
+    let req
+    try {
+      req = parseJevRequest(JSON.parse(raw))
+    } catch (err) {
+      const message = err instanceof ValidationError ? err.message : 'Body must be valid JSON'
+      return json(400, { error: message })
+    }
+
+    const now = deps.now()
+    const long = stateChars(req) > LONG_CONTEXT_CHARS
+    const buckets = ['burst', 'hour']
+    if (req.image) buckets.push('image')
+    if (long) buckets.push('long')
+    const wait = deps.limiter.check(clientIp(request.headers), buckets, now)
+    if (wait > 0) {
+      return json(
+        429,
+        { error: `Slow down! Try again in ${wait}s.` },
+        { 'retry-after': String(wait) },
+      )
+    }
+    if (spentLastHour(now) >= deps.hourlyBudgetUsd) {
+      return json(503, { error: 'The demo hit its hourly spending cap. Try again later.' })
+    }
+
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${deps.apiKey}`,
+      'content-type': 'application/json',
+      'http-referer': 'https://jev-demos.vercel.app',
+      'x-title': 'Jev Demos',
+    }
+    if (req.image) headers['TypeSafe-Danger-Zone-Images'] = 'true'
+    if (long) headers['TypeSafe-Danger-Zone-Long-Context'] = 'true'
+
+    const started = deps.now()
+    let upstream: Response
+    try {
+      upstream = await deps.fetch(UPSTREAM_URL, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: MODEL,
+          state: toUpstreamState(req),
+          questions: req.questions,
+        }),
+        signal: AbortSignal.timeout(25_000),
+      })
+    } catch {
+      return json(502, { error: 'Could not reach Jev' })
+    }
+    const latencyMs = deps.now() - started
+
+    let data: unknown
+    try {
+      data = await upstream.json()
+    } catch {
+      return json(502, { error: 'Jev returned an unreadable response' })
+    }
+    if (!upstream.ok) {
+      const message =
+        (data as { error?: { message?: string } })?.error?.message ?? `Jev error ${upstream.status}`
+      return json(upstream.status === 429 ? 429 : 502, { error: message })
+    }
+
+    const d = data as {
+      answers?: Record<string, unknown>
+      model?: string
+      usage?: { input_tokens?: number; output_tokens?: number; cost?: number }
+    }
+    if (!d.answers) return json(502, { error: 'Jev returned no answers' })
+    const cost = d.usage?.cost ?? 0
+    spend.push({ at: now, cost })
+
+    const payload: JevAnswerPayload = {
+      answers: d.answers,
+      model: d.model ?? MODEL,
+      usage: {
+        inputTokens: d.usage?.input_tokens ?? 0,
+        outputTokens: d.usage?.output_tokens ?? 0,
+        cost,
+      },
+      latencyMs,
+    }
+    return json(200, payload)
+  }
+}
