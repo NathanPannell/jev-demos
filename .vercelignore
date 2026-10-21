@@ -1,0 +1,5 @@
+# Keep tests and dev tooling out of the deployment (every file under api/ becomes a function).
+**/*.test.ts
+e2e
+scripts
+.github
