@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Connect, Plugin } from 'vite'
-import * as health from '../api/health.js'
+import * as health from '../api/health.ts'
+import * as jev from '../api/jev.ts'
 
 type Handler = (request: Request) => Response | Promise<Response>
 type Route = Partial<Record<'GET' | 'POST', Handler>>
@@ -8,6 +9,7 @@ type Route = Partial<Record<'GET' | 'POST', Handler>>
 // Mirrors the Vercel Functions in /api so `vite dev` and `vite preview` (used by e2e) serve them too.
 const routes: Record<string, Route> = {
   '/api/health': health,
+  '/api/jev': jev,
 }
 
 async function readBody(req: IncomingMessage): Promise<Buffer> {
