@@ -31,7 +31,11 @@ it('allows the AI Build Night storefront by default', async () => {
     'https://www.aibuildnight.ca',
     'https://reecharge.myshopify.com',
   ]) {
-    expect(OPTIONS(preflight(origin)).headers.get('access-control-allow-origin')).toBe(origin)
+    const res = OPTIONS(preflight(origin))
+    expect(res.headers.get('access-control-allow-origin')).toBe(origin)
+    expect(res.headers.get('access-control-allow-methods')).toBe('POST')
+    expect(res.headers.get('access-control-allow-headers')).toBe('content-type')
+    expect(res.headers.get('access-control-max-age')).toBe('7200')
   }
   const other = OPTIONS(preflight('https://evil.example'))
   expect(other.headers.get('access-control-allow-origin')).toBeNull()

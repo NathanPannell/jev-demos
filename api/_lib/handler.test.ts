@@ -270,6 +270,17 @@ describe('CORS', () => {
     expect(headers + (await res.text())).not.toContain('test-key')
   })
 
+  it('keeps CORS headers on an unexpected error', async () => {
+    const limiter = new RateLimiter({ burst: { max: 1, windowMs: 60_000 } })
+    limiter.check = () => {
+      throw new Error('boom')
+    }
+    const { handler } = setup({ limiter, allowedOrigins: allowed })
+    const res = await handler(post(ask, { origin: 'https://aibuildnight.ca' }))
+    expect(res.status).toBe(500)
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://aibuildnight.ca')
+  })
+
   it('matches origins exactly', () => {
     expect(corsHeaders('https://aibuildnight.ca/', allowed)).toEqual({})
     expect(corsHeaders('HTTPS://AIBUILDNIGHT.CA', allowed)).toEqual({})
@@ -296,6 +307,13 @@ describe('parseAllowedOrigins', () => {
     expect([...parseAllowedOrigins('*, https://*.shopifypreview.com, https://a.example')]).toEqual([
       'https://a.example',
     ])
+  })
+
+  it('drops entries that are not canonical origins, failing closed', () => {
+    const raw = 'null, https://a.example/, https://A.example, https://a.example/x, a.example, ok'
+    expect([...parseAllowedOrigins(raw)]).toEqual([])
+    expect([...parseAllowedOrigins('*')]).toEqual([])
+    expect([...parseAllowedOrigins('http://localhost:5173')]).toEqual(['http://localhost:5173'])
   })
 })
 

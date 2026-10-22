@@ -29,8 +29,9 @@ export const DEFAULT_ALLOWED_ORIGINS = [
 ]
 
 /**
- * Parses the comma-separated origin allowlist env var. Entries are exact origins; wildcards are
- * dropped. Missing or blank falls back to the default.
+ * Parses the comma-separated origin allowlist env var. Entries must be exact, canonical origins
+ * (`https://host[:port]`, lowercase, no path); wildcards, `null` and anything else are dropped.
+ * Missing or blank falls back to the default.
  */
 export function parseAllowedOrigins(
   raw: string | undefined,
@@ -40,8 +41,16 @@ export function parseAllowedOrigins(
   const origins = raw
     .split(',')
     .map((o) => o.trim())
-    .filter((o) => o !== '' && !o.includes('*'))
+    .filter((o) => !o.includes('*') && isCanonicalOrigin(o))
   return new Set(origins)
+}
+
+function isCanonicalOrigin(value: string): boolean {
+  try {
+    return new URL(value).origin === value
+  } catch {
+    return false
+  }
 }
 
 /** CORS headers for an allowlisted origin; none for any other (or missing) origin. */
@@ -115,7 +124,12 @@ export function createJevHandler(deps: HandlerDeps) {
   // Every response, errors included, carries the CORS headers for an allowed origin, so the
   // calling page can read the error message.
   return async function POST(request: Request): Promise<Response> {
-    const res = await handle(request)
+    let res: Response
+    try {
+      res = await handle(request)
+    } catch {
+      res = json(500, { error: 'Something went wrong' })
+    }
     const cors = corsHeaders(request.headers.get('origin'), deps.allowedOrigins ?? new Set())
     for (const [name, value] of Object.entries(cors)) res.headers.set(name, value)
     return res
