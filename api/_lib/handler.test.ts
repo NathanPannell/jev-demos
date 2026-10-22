@@ -2,11 +2,15 @@
 // the deployed site call the real Jev model.
 import { describe, expect, it, vi } from 'vitest'
 import {
+  corsHeaders,
   createJevHandler,
+  createPreflightHandler,
+  DEFAULT_ALLOWED_ORIGINS,
   defaultLimiter,
   estimateCostUsd,
   LONG_CONTEXT_CHARS,
   MODEL,
+  parseAllowedOrigins,
   parseBudget,
   UPSTREAM_URL,
 } from './handler'
@@ -167,6 +171,131 @@ describe('POST /api/jev', () => {
     const body = await (await handler(post(ask))).json()
     expect(body.usage).toEqual({ inputTokens: 0, outputTokens: 0, cost: 0 })
     expect(body.model).toBe(MODEL)
+  })
+})
+
+const allowed = new Set(DEFAULT_ALLOWED_ORIGINS)
+const corsNames = (res: Response) =>
+  [...res.headers.keys()].filter((name) => name.startsWith('access-control-') || name === 'vary')
+
+const preflight = (headers: Record<string, string>) =>
+  new Request('http://localhost/api/jev', {
+    method: 'OPTIONS',
+    headers: {
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type',
+      ...headers,
+    },
+  })
+
+describe('CORS', () => {
+  it('answers a preflight from an allowed origin', () => {
+    const res = createPreflightHandler(allowed)(preflight({ origin: 'https://aibuildnight.ca' }))
+    expect(res.status).toBe(204)
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://aibuildnight.ca')
+    expect(res.headers.get('vary')).toBe('Origin')
+    expect(res.headers.get('access-control-allow-methods')).toBe('POST')
+    expect(res.headers.get('access-control-allow-headers')).toBe('content-type')
+    expect(Number(res.headers.get('access-control-max-age'))).toBeGreaterThan(0)
+  })
+
+  it('sends no CORS headers on a preflight from any other origin', () => {
+    const options = createPreflightHandler(allowed)
+    for (const origin of [
+      'https://evil.example',
+      'https://aibuildnight.ca.evil.example',
+      'http://aibuildnight.ca',
+      'https://other-store.myshopify.com',
+      'https://abc123.shopifypreview.com',
+      'null',
+    ]) {
+      expect(corsNames(options(preflight({ origin })))).toEqual([])
+    }
+    expect(corsNames(options(preflight({})))).toEqual([])
+  })
+
+  it('adds CORS headers to POST responses for allowed origins only, errors included', async () => {
+    const { handler } = setup({ allowedOrigins: allowed })
+    const ok = await handler(post(ask, { origin: 'https://www.aibuildnight.ca' }))
+    expect(ok.status).toBe(200)
+    expect(ok.headers.get('access-control-allow-origin')).toBe('https://www.aibuildnight.ca')
+    expect(ok.headers.get('vary')).toBe('Origin')
+
+    const bad = await handler(post('{not json', { origin: 'https://reecharge.myshopify.com' }))
+    expect(bad.status).toBe(400)
+    expect(bad.headers.get('access-control-allow-origin')).toBe('https://reecharge.myshopify.com')
+
+    expect(corsNames(await handler(post(ask, { origin: 'https://evil.example' })))).toEqual([])
+    expect(corsNames(await handler(post(ask)))).toEqual([])
+  })
+
+  it('lets allowed origins read 429, 503 and 500 errors', async () => {
+    const origin = { origin: 'https://aibuildnight.ca' }
+    const limiter = new RateLimiter({ burst: { max: 1, windowMs: 60_000 } })
+    const limited = setup({ limiter, allowedOrigins: allowed })
+    await limited.handler(post(ask, origin))
+    const slow = await limited.handler(post(ask, origin))
+    expect(slow.status).toBe(429)
+    expect(slow.headers.get('access-control-allow-origin')).toBe('https://aibuildnight.ca')
+
+    const broke = setup({ hourlyBudgetUsd: 0.000000001, allowedOrigins: allowed })
+    const capped = await broke.handler(post(ask, origin))
+    expect(capped.status).toBe(503)
+    expect(capped.headers.get('access-control-allow-origin')).toBe('https://aibuildnight.ca')
+
+    const nokey = setup({ apiKey: undefined, allowedOrigins: allowed })
+    const res = await nokey.handler(post(ask, origin))
+    expect(res.status).toBe(500)
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://aibuildnight.ca')
+  })
+
+  it('still requires JSON from an allowed origin', async () => {
+    const { handler, fetchMock } = setup({ allowedOrigins: allowed })
+    const res = await handler(
+      post(ask, { origin: 'https://aibuildnight.ca', 'content-type': 'text/plain' }),
+    )
+    expect(res.status).toBe(415)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('allows no origins unless configured', async () => {
+    const { handler } = setup()
+    expect(corsNames(await handler(post(ask, { origin: 'https://aibuildnight.ca' })))).toEqual([])
+  })
+
+  it('never puts the API key in a response', async () => {
+    const { handler } = setup({ allowedOrigins: allowed })
+    const res = await handler(post(ask, { origin: 'https://aibuildnight.ca' }))
+    const headers = JSON.stringify([...res.headers.entries()])
+    expect(headers + (await res.text())).not.toContain('test-key')
+  })
+
+  it('matches origins exactly', () => {
+    expect(corsHeaders('https://aibuildnight.ca/', allowed)).toEqual({})
+    expect(corsHeaders('HTTPS://AIBUILDNIGHT.CA', allowed)).toEqual({})
+    expect(corsHeaders(null, allowed)).toEqual({})
+  })
+})
+
+describe('parseAllowedOrigins', () => {
+  it('defaults to the AI Build Night storefront origins', () => {
+    for (const raw of [undefined, '', '  ']) {
+      expect([...parseAllowedOrigins(raw)]).toEqual([
+        'https://aibuildnight.ca',
+        'https://www.aibuildnight.ca',
+        'https://reecharge.myshopify.com',
+      ])
+    }
+  })
+
+  it('takes an override and drops wildcards', () => {
+    expect([...parseAllowedOrigins(' https://a.example , https://b.example,,')]).toEqual([
+      'https://a.example',
+      'https://b.example',
+    ])
+    expect([...parseAllowedOrigins('*, https://*.shopifypreview.com, https://a.example')]).toEqual([
+      'https://a.example',
+    ])
   })
 })
 
