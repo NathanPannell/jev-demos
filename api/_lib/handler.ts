@@ -21,6 +21,64 @@ export function parseBudget(raw: string | undefined, fallback = 0.5): number {
   return raw !== undefined && raw.trim() !== '' && Number.isFinite(n) && n > 0 ? n : fallback
 }
 
+/** Sites that may call `/api/jev` from the browser: the AI Build Night Shopify storefront. */
+export const DEFAULT_ALLOWED_ORIGINS = [
+  'https://aibuildnight.ca',
+  'https://www.aibuildnight.ca',
+  'https://reecharge.myshopify.com',
+]
+
+/**
+ * Parses the comma-separated origin allowlist env var. Entries must be exact, canonical origins
+ * (`https://host[:port]`, lowercase, no path); wildcards, `null` and anything else are dropped.
+ * Missing or blank falls back to the default.
+ */
+export function parseAllowedOrigins(
+  raw: string | undefined,
+  fallback = DEFAULT_ALLOWED_ORIGINS,
+): ReadonlySet<string> {
+  if (raw === undefined || raw.trim() === '') return new Set(fallback)
+  const origins = raw
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => !o.includes('*') && isCanonicalOrigin(o))
+  return new Set(origins)
+}
+
+function isCanonicalOrigin(value: string): boolean {
+  try {
+    return new URL(value).origin === value
+  } catch {
+    return false
+  }
+}
+
+/** CORS headers for an allowlisted origin; none for any other (or missing) origin. */
+export function corsHeaders(
+  origin: string | null,
+  allowed: ReadonlySet<string>,
+): Record<string, string> {
+  if (origin === null || !allowed.has(origin)) return {}
+  return { 'access-control-allow-origin': origin, vary: 'Origin' }
+}
+
+/** Answers the CORS preflight. Only allowlisted origins get headers, so the browser blocks the rest. */
+export function createPreflightHandler(allowed: ReadonlySet<string>) {
+  return function OPTIONS(request: Request): Response {
+    const cors = corsHeaders(request.headers.get('origin'), allowed)
+    if (!cors['access-control-allow-origin']) return new Response(null, { status: 204 })
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...cors,
+        'access-control-allow-methods': 'POST',
+        'access-control-allow-headers': 'content-type',
+        'access-control-max-age': '7200',
+      },
+    })
+  }
+}
+
 /** Above this much text, opt in to Jev's long-context mode (TypeSafe's "Danger Zone"). */
 export const LONG_CONTEXT_CHARS = 100_000
 
@@ -38,6 +96,8 @@ export interface HandlerDeps {
   now: () => number
   /** Per-instance spend ceiling per rolling hour, in USD. */
   hourlyBudgetUsd: number
+  /** Exact origins that may call from the browser (CORS). Defaults to none. */
+  allowedOrigins?: ReadonlySet<string>
 }
 
 export function defaultLimiter(): RateLimiter {
@@ -61,11 +121,25 @@ export function createJevHandler(deps: HandlerDeps) {
     return spend.reduce((n, s) => n + s.cost, 0)
   }
 
+  // Every response, errors included, carries the CORS headers for an allowed origin, so the
+  // calling page can read the error message.
   return async function POST(request: Request): Promise<Response> {
+    let res: Response
+    try {
+      res = await handle(request)
+    } catch {
+      res = json(500, { error: 'Something went wrong' })
+    }
+    const cors = corsHeaders(request.headers.get('origin'), deps.allowedOrigins ?? new Set())
+    for (const [name, value] of Object.entries(cors)) res.headers.set(name, value)
+    return res
+  }
+
+  async function handle(request: Request): Promise<Response> {
     if (!deps.apiKey) return json(500, { error: 'Server is missing OPENROUTER_API_KEY' })
 
-    // Requiring JSON forces a CORS preflight, which fails cross-origin (no CORS headers), so other
-    // sites can't spend the key through their visitors' browsers.
+    // Requiring JSON forces a CORS preflight, which fails for any origin not on the allowlist, so
+    // other sites can't spend the key through their visitors' browsers.
     const type = request.headers.get('content-type') ?? ''
     if (!type.toLowerCase().startsWith('application/json')) {
       return json(415, { error: 'Send application/json' })
