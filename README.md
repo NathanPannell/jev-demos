@@ -68,7 +68,7 @@ node scripts/render-mockups.ts         # regenerate the audit screenshots
 
 ## CI gate
 
-`.github/workflows/ci.yml` runs on every PR to `staging` and `main`: lockfile install, Prettier, ESLint with zero warnings, `tsc`, Vitest with a coverage floor (thresholds in `vite.config.ts`), the production build, Playwright e2e (desktop and mobile) against `vite preview` of the built app, which also serves `/api` and makes real Jev calls using the `OPENROUTER_API_KEY` repo secret, `npm audit --audit-level=high`, a no-`.env` check and a gitleaks scan. There is no database, so there is no migration job.
+`.github/workflows/ci.yml` runs on every PR to `main` and every push to `main` (not for `staging`; run the same checks locally before a PR to `staging`): lockfile install, Prettier, ESLint with zero warnings, `tsc`, Vitest with a coverage floor (thresholds in `vite.config.ts`), the production build, Playwright e2e (desktop and mobile) against `vite preview` of the built app, which also serves `/api` and makes real Jev calls using the `OPENROUTER_API_KEY` repo secret, `npm audit --audit-level=high`, a no-`.env` check and a gitleaks scan. There is no database, so there is no migration job.
 
 ## Deploy
 
